@@ -1,23 +1,14 @@
-from pyrogram import Client, filters
-from pyrogram.types import Message
-from keep_alive import keep_alive
-import os
-import asyncio
-import json
+from pyrogram import Client, filters from pyrogram.types import Message from keep_alive import keep_alive import os import asyncio import json
 
-API_ID = int(os.environ.get("API_ID")) API_HASH = os.environ.get("API_HASH") BOT_TOKEN = os.environ.get("BOT_TOKEN") OWNER_ID = int(os.environ.get("OWNER_ID")) DB_CHANNEL = int(os.environ.get("DB_CHANNEL"))  # Add this to your Render env
+API_ID = int(os.environ.get("API_ID")) API_HASH = os.environ.get("API_HASH") BOT_TOKEN = os.environ.get("BOT_TOKEN") OWNER_ID = int(os.environ.get("OWNER_ID")) DB_CHANNEL = int(os.environ.get("DB_CHANNEL"))
 
 app = Client("forward_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-Storage
-
 user_state = {} pause_flag = {} delay_time = {} replacements = {} authorized_users = set() AUTHORIZED_FILE = "authorized_users.json"
 
-Load authorized users from file
+Load and Save Auth Users
 
 def load_users(): global authorized_users try: with open(AUTHORIZED_FILE, "r") as f: authorized_users = set(json.load(f)) except: authorized_users = set([OWNER_ID]) save_users()
-
-Save authorized users to file
 
 def save_users(): with open(AUTHORIZED_FILE, "w") as f: json.dump(list(authorized_users), f)
 
@@ -47,9 +38,22 @@ load_users()
 
 @app.on_message(filters.text & filters.user(list(authorized_users))) async def handle_text(client, message: Message): uid = message.from_user.id text = message.text if "=>" in text: old, new = text.split("=>") if uid not in replacements: replacements[uid] = {} replacements[uid][old.strip()] = new.strip() await message.reply(f"🔁 Replacement set: {old.strip()} → {new.strip()}")
 
-@app.on_message(filters.forwarded & filters.user(list(authorized_users))) async def handle_forwarded(client, message: Message): uid = message.from_user.id if uid not in user_state: user_state[uid] = {"target_chat": message.forward_from_chat.id} await message.reply("✅ Target chat saved. Now forward first message from source channel.") elif "first_msg_id" not in user_state[uid]: user_state[uid]["source_chat"] = message.forward_from_chat.id user_state[uid]["first_msg_id"] = message.forward_from_message_id await message.reply("✅ First source message saved. Now forward last message.") elif "last_msg_id" not in user_state[uid]: user_state[uid]["last_msg_id"] = message.forward_from_message_id await message.reply("🚀 Starting to forward...")
+@app.on_message(filters.forwarded & filters.user(list(authorized_users))) async def handle_forwarded(client, message: Message): uid = message.from_user.id if not message.forward_from_chat: return await message.reply("⚠️ Please forward a message from a channel (not a user).")
 
-sc = user_state[uid]["source_chat"]
+if uid not in user_state:
+    user_state[uid] = {"target_chat": message.forward_from_chat.id}
+    return await message.reply("✅ Target chat saved. Now forward first message from source channel.")
+
+if "first_msg_id" not in user_state[uid]:
+    user_state[uid]["source_chat"] = message.forward_from_chat.id
+    user_state[uid]["first_msg_id"] = message.forward_from_message_id
+    return await message.reply("✅ First source message saved. Now forward last message.")
+
+if "last_msg_id" not in user_state[uid]:
+    user_state[uid]["last_msg_id"] = message.forward_from_message_id
+    await message.reply("🚀 Starting to forward...")
+
+    sc = user_state[uid]["source_chat"]
     tc = user_state[uid]["target_chat"]
     f_id = user_state[uid]["first_msg_id"]
     l_id = user_state[uid]["last_msg_id"]
