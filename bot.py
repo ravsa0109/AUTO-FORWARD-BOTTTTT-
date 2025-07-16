@@ -1,4 +1,9 @@
-from pyrogram import Client, filters from pyrogram.types import Message from keep_alive import keep_alive import os import asyncio import json
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from keep_alive import keep_alive
+import os
+import asyncio
+import json
 
 API_ID = int(os.environ.get("API_ID")) API_HASH = os.environ.get("API_HASH") BOT_TOKEN = os.environ.get("BOT_TOKEN") OWNER_ID = int(os.environ.get("OWNER_ID")) DB_CHANNEL = int(os.environ.get("DB_CHANNEL"))  # Add this to your Render env
 
