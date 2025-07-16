@@ -26,21 +26,29 @@ async def start(client, message):
 
 @app.on_message(filters.command("authorize") & filters.user(OWNER_ID))
 async def authorize_user(client, message):
-    try:
-        uid = int(message.text.split()[1])
-        authorized_users.add(uid)
-        await message.reply(f"✅ Authorized user {uid}")
-    except:
-        await message.reply("❌ Usage: /authorize <user_id>")
+    args = message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await message.reply("❌ Usage: /authorize <user_id>")
+
+    uid = int(args[1])
+    if uid in authorized_users:
+        return await message.reply(f"ℹ️ User {uid} is already authorized.")
+    
+    authorized_users.add(uid)
+    await message.reply(f"✅ User {uid} has been authorized.")
 
 @app.on_message(filters.command("unauthorize") & filters.user(OWNER_ID))
 async def unauthorize_user(client, message):
-    try:
-        uid = int(message.text.split()[1])
-        authorized_users.discard(uid)
-        await message.reply(f"❌ Unauthorized user {uid}")
-    except:
-        await message.reply("❌ Usage: /unauthorize <user_id>")
+    args = message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await message.reply("❌ Usage: /unauthorize <user_id>")
+
+    uid = int(args[1])
+    if uid not in authorized_users:
+        return await message.reply(f"ℹ️ User {uid} is not authorized.")
+
+    authorized_users.remove(uid)
+    await message.reply(f"🚫 User {uid} has been unauthorized.")
 
 @app.on_message(filters.command("pause") & filters.user(OWNER_ID))
 async def pause(client, message):
@@ -77,7 +85,7 @@ async def clear_replacements(client, message):
     replacements[uid] = {}
     await message.reply("🧽 Cleared all word replacements.")
 
-@app.on_message(filters.text & filters.user(authorized_users))
+@app.on_message(filters.text & filters.user(list(authorized_users)))
 async def handle_text(client, message: Message):
     uid = message.from_user.id
     text = message.text
@@ -88,7 +96,7 @@ async def handle_text(client, message: Message):
         replacements[uid][old.strip()] = new.strip()
         await message.reply(f"🔁 Replacement set: `{old.strip()}` → `{new.strip()}`")
 
-@app.on_message(filters.forwarded & filters.user(authorized_users))
+@app.on_message(filters.forwarded & filters.user(list(authorized_users)))
 async def handle_forwarded(client, message: Message):
     uid = message.from_user.id
     if uid not in user_state:
