@@ -4,10 +4,12 @@ from keep_alive import keep_alive
 import os
 import asyncio
 import re
+import time
 
+# Fixed environment variable syntax
 API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH"))
-BOT_TOKEN = os.environ.get("BOT_TOKEN"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID"))
 
 app = Client("forward_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -69,6 +71,15 @@ async def callback_handler(client, query):
             "Send /done when finished",
             parse_mode=enums.ParseMode.MARKDOWN
         )
+    elif query.data == "start_forwarding":
+        state = user_state.get(uid)
+        if not state:
+            await query.answer("Session expired. Start again.", show_alert=True)
+            return
+        
+        state["waiting_for_replacement"] = False
+        await query.message.edit("✅ Starting forwarding without replacements...")
+        await start_forwarding(uid, query.message)
 
 @app.on_message(filters.forwarded & filters.user(OWNER_ID))
 async def handle_forward(client, message: Message):
@@ -134,8 +145,8 @@ async def handle_replacement(client, message: Message):
         re.compile(pattern)
         state["replacements"].append((pattern, replacement))
         await message.reply(f"✅ Added replacement:\n\n`{pattern}` → `{replacement}`", parse_mode=enums.ParseMode.MARKDOWN)
-    except re.error:
-        await message.reply("❌ Invalid regex pattern. Please try again.")
+    except re.error as e:
+        await message.reply(f"❌ Invalid regex pattern: {e}. Please try again.")
 
 async def apply_replacements(text, replacements):
     if not text or not replacements:
@@ -161,12 +172,16 @@ async def start_forwarding(uid, message: Message):
     
     total_messages = last - first + 1
     total_forwarded = 0
+    failed_messages = []
     
     status_msg = await message.reply(f"⏳ Starting to forward {total_messages} messages... (0%)")
 
     # Batch processing (100 messages per request)
-    for offset in range(0, total_messages, 100):
-        batch_ids = list(range(first + offset, min(first + offset + 100, last + 1)))
+    batch_size = 100
+    for offset in range(0, total_messages, batch_size):
+        batch_start = first + offset
+        batch_end = min(first + offset + batch_size, last + 1)
+        batch_ids = list(range(batch_start, batch_end))
         
         try:
             messages = await app.get_messages(source, batch_ids)
@@ -176,6 +191,7 @@ async def start_forwarding(uid, message: Message):
 
         for msg in messages:
             if not msg:
+                failed_messages.append(batch_start + len(failed_messages))
                 continue
             
             try:
@@ -194,23 +210,28 @@ async def start_forwarding(uid, message: Message):
                 
                 total_forwarded += 1
                 
-                # Update progress every 10%
-                if total_forwarded % max(1, total_messages // 10) == 0:
+                # Update progress every 10 messages or 5%
+                if total_forwarded % 10 == 0 or total_forwarded % max(1, total_messages//20) == 0:
                     progress = int(total_forwarded / total_messages * 100)
                     await status_msg.edit(f"⏳ Forwarding... {progress}% ({total_forwarded}/{total_messages})")
             
             except Exception as e:
                 print(f"Error forwarding {msg.id}: {e}")
+                failed_messages.append(msg.id)
         
-        # Avoid flooding
-        await asyncio.sleep(2)
+        # Avoid flooding and respect Telegram limits
+        await asyncio.sleep(5)
+    
+    # Final report
+    report = f"✅ Forwarded {total_forwarded}/{total_messages} messages successfully!"
+    if failed_messages:
+        report += f"\n\n❌ Failed messages: {len(failed_messages)}\nIDs: {', '.join(map(str, failed_messages[:10]))}" + \
+                 ("..." if len(failed_messages) > 10 else "")
+    
+    report += f"\n\nTarget: `{target}`\nReplacements applied: {len(replacements)}"
     
     await status_msg.delete()
-    await message.reply(
-        f"✅ Forwarded {total_forwarded}/{total_messages} messages successfully!\n\n"
-        f"Target: `{target}`\nReplacements applied: {len(replacements)}",
-        parse_mode=enums.ParseMode.MARKDOWN
-    )
+    await message.reply(report, parse_mode=enums.ParseMode.MARKDOWN)
     del user_state[uid]
 
 keep_alive()
