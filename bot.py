@@ -1,6 +1,6 @@
 from pyrogram import Client, filters from pyrogram.types import Message from keep_alive import keep_alive import os import asyncio import json
 
-API_ID = int(os.environ.get("API_ID")) API_HASH = os.environ.get("API_HASH") BOT_TOKEN = os.environ.get("BOT_TOKEN") OWNER_ID = int(os.environ.get("OWNER_ID"))
+API_ID = int(os.environ.get("API_ID")) API_HASH = os.environ.get("API_HASH") BOT_TOKEN = os.environ.get("BOT_TOKEN") OWNER_ID = int(os.environ.get("OWNER_ID")) DB_CHANNEL = int(os.environ.get("DB_CHANNEL"))  # Add this to your Render env
 
 app = Client("forward_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -64,12 +64,15 @@ sc = user_state[uid]["source_chat"]
                 for old, new in rep.items():
                     text = text.replace(old, new)
                 await app.send_message(tc, text)
+                await app.send_message(DB_CHANNEL, text)
             elif caption and (msg.photo or msg.video or msg.document or msg.audio or msg.voice):
                 for old, new in rep.items():
                     caption = caption.replace(old, new)
                 await msg.copy(tc, caption=caption)
+                await msg.copy(DB_CHANNEL, caption=caption)
             else:
                 await msg.copy(tc)
+                await msg.copy(DB_CHANNEL)
 
             if idx % 5 == 0 or idx == total:
                 await message.reply(f"📦 {idx}/{total} messages forwarded.")
