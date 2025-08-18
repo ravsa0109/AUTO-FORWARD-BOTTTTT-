@@ -1,15 +1,12 @@
-from flask import Flask
-from threading import Thread
+from aiohttp import web
 
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is alive"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
+async def handle(request):
+    return web.Response(text="Bot is alive!")
 
 def keep_alive():
-    t = Thread(target=run)
-    t.start()
+    app = web.Application()
+    app.add_routes([web.get("/", handle)])
+    web.run_app(app, host="0.0.0.0", port=8080)
+
+if __name__ == "__main__":
+    keep_alive()
