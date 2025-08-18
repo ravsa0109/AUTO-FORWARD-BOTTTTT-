@@ -1,66 +1,94 @@
 import os
 import asyncio
-import logging
-import re
-from telegram import Bot
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from aiohttp import web
 
-# Logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-
-# Load ENV
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-bot = Bot(token=BOT_TOKEN)
 
-# --- Forwarding Function ---
-async def forward_messages(update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        args = context.args
-        if len(args) < 3:
-            await update.message.reply_text("Usage: /forward <source_chat_id> <target_chat_id> <start_msg_id>-<end_msg_id>")
-            return
+# In-memory storage
+user_data = {}
 
-        source_chat_id = int(args[0])
-        target_chat_id = int(args[1])
-        msg_range = args[2].split("-")
-        start_msg_id = int(msg_range[0])
-        end_msg_id = int(msg_range[1])
+# Start command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Welcome!\n\n"
+        "Use /setsource <channel_id> to set source channel\n"
+        "Use /setdest <channel_id> to set destination channel\n"
+        "Use /forward <start_id> <end_id> to forward messages\n\n"
+        "Example:\n/setsource -1001234567890\n/setdest -1009876543210\n/forward 10 50"
+    )
 
-        await update.message.reply_text(f"Forwarding {start_msg_id} to {end_msg_id}...")
+# Set source channel
+async def set_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /setsource <channel_id>")
+        return
+    user_data["source"] = int(context.args[0])
+    await update.message.reply_text(f"✅ Source channel set to {context.args[0]}")
 
-        count = 0
-        for msg_id in range(start_msg_id, end_msg_id + 1):
-            try:
-                await bot.copy_message(chat_id=target_chat_id, from_chat_id=source_chat_id, message_id=msg_id)
+# Set destination channel
+async def set_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /setdest <channel_id>")
+        return
+    user_data["dest"] = int(context.args[0])
+    await update.message.reply_text(f"✅ Destination channel set to {context.args[0]}")
 
-                count += 1
-                if count % 10 == 0:
-                    logging.info("Sleeping for 5 seconds to prevent overload...")
-                    await asyncio.sleep(5)
+# Forward messages
+async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "source" not in user_data or "dest" not in user_data:
+        await update.message.reply_text("⚠️ Please set source and destination first using /setsource and /setdest")
+        return
 
-            except Exception as e:
-                logging.error(f"Failed to forward {msg_id}: {e}")
-                continue
+    if len(context.args) < 2:
+        await update.message.reply_text("⚠️ Usage: /forward <start_id> <end_id>")
+        return
 
-        await update.message.reply_text("✅ Forwarding completed!")
+    source = user_data["source"]
+    dest = user_data["dest"]
+    start_id = int(context.args[0])
+    end_id = int(context.args[1])
 
-    except Exception as e:
-        logging.error(f"Error: {e}")
-        await update.message.reply_text("❌ Something went wrong.")
+    await update.message.reply_text(f"🚀 Starting forward from {start_id} to {end_id}...")
 
-# --- Start Command ---
-async def start(update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Bot is alive and ready!")
+    count = 0
+    for msg_id in range(start_id, end_id + 1):
+        try:
+            msg = await context.bot.forward_message(
+                chat_id=dest,
+                from_chat_id=source,
+                message_id=msg_id
+            )
 
-# --- Main Bot ---
+            # Remove forward tag by copying
+            await context.bot.copy_message(
+                chat_id=dest,
+                from_chat_id=source,
+                message_id=msg_id
+            )
+            await context.bot.delete_message(chat_id=dest, message_id=msg.message_id)
+
+            count += 1
+
+            # Sleep after every 10 messages
+            if count % 10 == 0:
+                await update.message.reply_text(f"⏸️ Paused 6s after {count} messages...")
+                await asyncio.sleep(6)
+
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Failed at {msg_id}: {e}")
+            continue
+
+    await update.message.reply_text("✅ Forward complete!")
+
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("setsource", set_source))
+    app.add_handler(CommandHandler("setdest", set_dest))
     app.add_handler(CommandHandler("forward", forward_messages))
+
     app.run_polling()
 
 if __name__ == "__main__":
