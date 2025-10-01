@@ -1,110 +1,68 @@
 import os
 import asyncio
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from pyrogram import Client, filters
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+OWNER_ID = int(os.environ.get("OWNER_ID"))
 
-# In-memory storage
-user_data = {
-    "source": None,
-    "destinations": []
-}
+app = Client(
+    "forward-bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-# Start command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Welcome!\n\n"
-        "Use /setsource <channel_id> to set source channel\n"
-        "Use /adddest <channel_id> to add destination channel\n"
-        "Use /listdest to see all destination channels\n"
-        "Use /forward <start_id> <end_id> to forward messages\n\n"
-        "Example:\n/setsource -1001234567890\n/adddest -1009876543210\n/adddest -1005555555555\n/forward 10 50"
-    )
+# Forward command
+@app.on_message(filters.command("forward") & filters.user(OWNER_ID))
+async def forward_messages(client, message):
+    try:
+        # Command format: /forward source_id target1,target2 target_msg_start-target_msg_end
+        args = message.text.split(" ")
 
-# Set source channel
-async def set_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Usage: /setsource <channel_id>")
-        return
-    user_data["source"] = int(context.args[0])
-    await update.message.reply_text(f"✅ Source channel set to {context.args[0]}")
+        if len(args) < 4:
+            await message.reply_text(
+                "❌ Wrong format.\n\nUsage:\n`/forward <source_chat_id> <target_chat_id1,target_chat_id2,...> <start_msg_id>-<end_msg_id>`"
+            )
+            return
 
-# Add destination channel
-async def add_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Usage: /adddest <channel_id>")
-        return
-    dest_id = int(context.args[0])
-    if dest_id not in user_data["destinations"]:
-        user_data["destinations"].append(dest_id)
-        await update.message.reply_text(f"✅ Added destination channel: {dest_id}")
+        source_chat = int(args[1]) if args[1].lstrip("-").isdigit() else args[1]
+        target_chats = [int(t) if t.lstrip("-").isdigit() else t for t in args[2].split(",")]
+        msg_range = args[3].split("-")
+
+        start_id = int(msg_range[0])
+        end_id = int(msg_range[1])
+
+        sent_count = 0
+        for msg_id in range(start_id, end_id + 1):
+            try:
+                msg = await client.get_messages(source_chat, msg_id)
+
+                for target in target_chats:
+                    await msg.copy(target)
+
+                sent_count += 1
+
+                # हर 10 messages के बाद 6 sec का gap
+                if sent_count % 10 == 0:
+                    await asyncio.sleep(6)
+
+            except Exception as e:
+                await message.reply_text(f"⚠️ Error at message {msg_id}: {e}")
+                continue
+
+        await message.reply_text(f"✅ Forwarded {sent_count} messages from {source_chat} to {len(target_chats)} targets.")
+
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {e}")
+
+
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    if message.from_user.id == OWNER_ID:
+        await message.reply_text("👋 Bot is running!\nUse /forward command to start forwarding.")
     else:
-        await update.message.reply_text("⚠️ This channel is already in destination list.")
+        await message.reply_text("❌ You are not authorized to use this bot.")
 
-# List destinations
-async def list_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not user_data["destinations"]:
-        await update.message.reply_text("⚠️ No destinations set yet.")
-        return
-    dests = "\n".join(str(d) for d in user_data["destinations"])
-    await update.message.reply_text(f"📌 Destination channels:\n{dests}")
-
-# Forward messages
-async def forward_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not user_data["source"] or not user_data["destinations"]:
-        await update.message.reply_text("⚠️ Please set source and at least one destination using /setsource and /adddest")
-        return
-
-    if len(context.args) < 2:
-        await update.message.reply_text("⚠️ Usage: /forward <start_id> <end_id>")
-        return
-
-    source = user_data["source"]
-    destinations = user_data["destinations"]
-    start_id = int(context.args[0])
-    end_id = int(context.args[1])
-
-    await update.message.reply_text(
-        f"🚀 Starting forward from {start_id} to {end_id}...\n"
-        f"📌 Destinations: {len(destinations)} channels"
-    )
-
-    count = 0
-    for msg_id in range(start_id, end_id + 1):
-        try:
-            for dest in destinations:
-                # Copy message (no forward tag)
-                await context.bot.copy_message(
-                    chat_id=dest,
-                    from_chat_id=source,
-                    message_id=msg_id
-                )
-                await asyncio.sleep(1)  # 1s gap per message per channel
-
-            count += 1
-
-            # Sleep after every 10 messages (extra flood safety)
-            if count % 10 == 0:
-                await update.message.reply_text(f"⏸️ Paused 6s after {count} messages...")
-                await asyncio.sleep(6)
-
-        except Exception as e:
-            await update.message.reply_text(f"⚠️ Failed at {msg_id}: {e}")
-            continue
-
-    await update.message.reply_text("✅ Forward complete!")
-
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("setsource", set_source))
-    app.add_handler(CommandHandler("adddest", add_dest))
-    app.add_handler(CommandHandler("listdest", list_dest))
-    app.add_handler(CommandHandler("forward", forward_messages))
-
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+app.run()
