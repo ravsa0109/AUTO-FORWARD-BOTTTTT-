@@ -1,68 +1,57 @@
 import os
 import asyncio
 from pyrogram import Client, filters
+from keep_alive import keep_alive
 
+# ================== ENV VARS ==================
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID"))
 
-app = Client(
-    "forward-bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+# create client
+app = Client("forward-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Forward command
+# ================== COMMANDS ==================
+@app.on_message(filters.command("start") & filters.private)
+async def start(client, message):
+    await message.reply_text(
+        "👋 Hi! I'm a Forward Bot.\n\n"
+        "Use this format:\n"
+        "`/forward <source_chat_id> <target_chat_id> <start_msg_id>-<end_msg_id>`\n\n"
+        "Example:\n`/forward -1001234567890 -1009876543210 10-50`"
+    )
+
 @app.on_message(filters.command("forward") & filters.user(OWNER_ID))
 async def forward_messages(client, message):
     try:
-        # Command format: /forward source_id target1,target2 target_msg_start-target_msg_end
-        args = message.text.split(" ")
+        parts = message.text.split()
+        if len(parts) != 4:
+            return await message.reply("❌ Wrong format.\n\nUsage:\n`/forward <source_chat_id> <target_chat_id> <start_msg_id>-<end_msg_id>`")
 
-        if len(args) < 4:
-            await message.reply_text(
-                "❌ Wrong format.\n\nUsage:\n`/forward <source_chat_id> <target_chat_id1,target_chat_id2,...> <start_msg_id>-<end_msg_id>`"
-            )
-            return
+        source_chat = int(parts[1])
+        target_chat = int(parts[2])
+        msg_range = parts[3].split("-")
+        start_id, end_id = int(msg_range[0]), int(msg_range[1])
 
-        source_chat = int(args[1]) if args[1].lstrip("-").isdigit() else args[1]
-        target_chats = [int(t) if t.lstrip("-").isdigit() else t for t in args[2].split(",")]
-        msg_range = args[3].split("-")
+        await message.reply(f"📤 Forwarding messages {start_id} → {end_id}...")
 
-        start_id = int(msg_range[0])
-        end_id = int(msg_range[1])
-
-        sent_count = 0
+        count = 0
         for msg_id in range(start_id, end_id + 1):
             try:
-                msg = await client.get_messages(source_chat, msg_id)
-
-                for target in target_chats:
-                    await msg.copy(target)
-
-                sent_count += 1
-
-                # हर 10 messages के बाद 6 sec का gap
-                if sent_count % 10 == 0:
-                    await asyncio.sleep(6)
-
+                await client.copy_message(chat_id=target_chat, from_chat_id=source_chat, message_id=msg_id)
+                count += 1
             except Exception as e:
-                await message.reply_text(f"⚠️ Error at message {msg_id}: {e}")
-                continue
+                print(f"Error on {msg_id}: {e}")
+            # floodwait handling → sleep every 10 messages
+            if count % 10 == 0:
+                await asyncio.sleep(6)
 
-        await message.reply_text(f"✅ Forwarded {sent_count} messages from {source_chat} to {len(target_chats)} targets.")
+        await message.reply(f"✅ Forwarding done! ({count} messages)")
 
     except Exception as e:
-        await message.reply_text(f"❌ Error: {e}")
+        await message.reply(f"⚠️ Error: {e}")
 
-
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    if message.from_user.id == OWNER_ID:
-        await message.reply_text("👋 Bot is running!\nUse /forward command to start forwarding.")
-    else:
-        await message.reply_text("❌ You are not authorized to use this bot.")
-
+# ================== START ==================
+keep_alive()
 app.run()
