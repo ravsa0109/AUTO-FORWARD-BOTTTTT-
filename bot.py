@@ -1,124 +1,96 @@
 import os
 import asyncio
-import logging
-import ntplib
-from time import sleep
 from pyrogram import Client, filters
-from pyrogram.errors import FloodWait
-from keep_alive import keep_alive
+from flask import Flask
 
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
-logging.basicConfig(level=logging.INFO)
-
-# Store channels in memory
-SOURCE = None
-TARGETS = []
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 app = Client(
     "forward-bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
+    bot_token=BOT_TOKEN
 )
 
-# Time sync function
-def sync_time():
-    try:
-        c = ntplib.NTPClient()
-        response = c.request('pool.ntp.org')
-        offset = response.offset
-        print(f"⏰ Time offset: {offset}")
-        if abs(offset) > 1:
-            print("⚠️ Time drift detected! Restart container if issues persist.")
-    except Exception as e:
-        print(f"Time sync failed: {e}")
+# Store source & destination channels in memory
+sources = []
+destinations = []
+
+# Flask app for keep-alive
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "✅ Bot is running!"
 
 # Commands
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
-    await message.reply("🤖 Auto Forward Bot Active!\n\n"
-                        "Use /set_source <chat_id>\n"
-                        "Use /add_target <chat_id>\n"
-                        "Use /forward <start_id> <end_id>\n"
-                        "Use /clear to reset.")
+    await message.reply("🤖 Bot is alive!\n\nUse:\n`/addsource id`\n`/adddest id`\n`/clear`\n`/forward 1 100`")
 
-@app.on_message(filters.command("set_source") & filters.private)
-async def set_source(client, message):
-    global SOURCE
-    try:
-        SOURCE = int(message.text.split()[1])
-        await message.reply(f"✅ Source set to `{SOURCE}`")
-    except:
-        await message.reply("❌ Usage: /set_source <chat_id>")
-
-@app.on_message(filters.command("add_target") & filters.private)
-async def add_target(client, message):
-    global TARGETS
+@app.on_message(filters.command("addsource") & filters.private)
+async def add_source(client, message):
     try:
         chat_id = int(message.text.split()[1])
-        TARGETS.append(chat_id)
-        await message.reply(f"✅ Target added: `{chat_id}`\nNow total: {len(TARGETS)}")
+        sources.append(chat_id)
+        await message.reply(f"✅ Source added: `{chat_id}`")
     except:
-        await message.reply("❌ Usage: /add_target <chat_id>")
+        await message.reply("⚠️ Usage: /addsource chat_id")
+
+@app.on_message(filters.command("adddest") & filters.private)
+async def add_dest(client, message):
+    try:
+        chat_id = int(message.text.split()[1])
+        destinations.append(chat_id)
+        await message.reply(f"✅ Destination added: `{chat_id}`")
+    except:
+        await message.reply("⚠️ Usage: /adddest chat_id")
 
 @app.on_message(filters.command("clear") & filters.private)
 async def clear(client, message):
-    global SOURCE, TARGETS
-    SOURCE = None
-    TARGETS = []
-    await message.reply("🧹 Cleared all sources and targets.")
+    sources.clear()
+    destinations.clear()
+    await message.reply("🗑 Cleared all sources and destinations.")
 
 @app.on_message(filters.command("forward") & filters.private)
-async def forward_range(client, message):
-    global SOURCE, TARGETS
-    if not SOURCE or not TARGETS:
-        await message.reply("⚠️ Please set source and targets first.")
-        return
+async def forward_messages(client, message):
     try:
-        start_id = int(message.text.split()[1])
-        end_id = int(message.text.split()[2])
+        parts = message.text.split()
+        start_id = int(parts[1])
+        end_id = int(parts[2])
+
+        if not sources or not destinations:
+            await message.reply("⚠️ Add source and destination first!")
+            return
+
+        for src in sources:
+            for msg_id in range(start_id, end_id + 1):
+                try:
+                    for dest in destinations:
+                        await app.copy_message(
+                            chat_id=dest,
+                            from_chat_id=src,
+                            message_id=msg_id
+                        )
+                except Exception as e:
+                    print(f"❌ Failed to forward {msg_id}: {e}")
+                    continue
+
+        await message.reply("✅ Forward complete.")
     except:
-        await message.reply("❌ Usage: /forward <start_id> <end_id>")
-        return
+        await message.reply("⚠️ Usage: /forward start_id end_id")
 
-    await message.reply(f"📤 Forwarding messages {start_id} → {end_id} ...")
-
-    count = 0
-    for msg_id in range(start_id, end_id + 1):
-        try:
-            msg = await client.get_messages(SOURCE, msg_id)
-            if msg:
-                for target in TARGETS:
-                    try:
-                        await msg.copy(target)
-                    except FloodWait as e:
-                        print(f"⏳ FloodWait {e.value} sec")
-                        await asyncio.sleep(e.value)
-        except Exception as e:
-            print(f"⚠️ Failed to forward {msg_id}: {e}")
-        count += 1
-        if count % 10 == 0:  # every 10 messages, sleep 6 sec
-            await asyncio.sleep(6)
-
-    await message.reply("✅ Forward complete!")
-
-# Main loop with retry
 async def main():
-    sync_time()
-    keep_alive()
-    while True:
-        try:
-            await app.start()
-            print("✅ Bot started successfully")
-            await app.idle()
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            await asyncio.sleep(5)
-        finally:
-            await app.stop()
+    await app.start()
+    print("✅ Bot started successfully")
+
+    # keep alive loop
+    loop_event = asyncio.Event()
+    await loop_event.wait()
 
 if __name__ == "__main__":
+    import threading
+    threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=8080)).start()
     asyncio.run(main())
