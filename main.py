@@ -14,13 +14,12 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-# Flask aur Hypercorn imports
+# Flask aur Waitress imports
 try:
-    from flask import Flask, request as flask_request
-    from hypercorn.config import Config as HypercornConfig
-    from hypercorn.asyncio import serve as hypercorn_serve
+    from flask import Flask, request as flask_request, Response
+    from waitress import serve as waitress_serve
 except ImportError:
-    print("Flask ya Hypercorn library nahi mili. Install karein: pip install flask hypercorn")
+    print("Flask ya Waitress library nahi mili. Install karein: pip install flask waitress")
     exit()
 
 # Set up logging
@@ -32,14 +31,38 @@ logger = logging.getLogger(__name__)
 # --- Environment Variables ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL") 
-PORT = int(os.environ.get("PORT", 8080))
+PORT = int(os.environ.get("PORT", 8080)) # Render PORT bhi set karta hai
+
+if not BOT_TOKEN:
+    logger.critical("BOT_TOKEN environment variable nahi mila!")
+    exit()
+if not WEBHOOK_URL:
+     logger.critical("RENDER_EXTERNAL_URL (WEBHOOK_URL) environment variable nahi mila")
+     exit()
+
+# --- Async Queue Setup (Sabse Zaroori) ---
+# Yeh Flask (sync) aur PTB (async) ke beech bridge ka kaam karega
+update_queue = asyncio.Queue()
 
 # --- Flask App (Uptimer ke liye) ---
 flask_app = Flask(__name__)
+
 @flask_app.route('/')
 def index():
     """UptimeRobot is endpoint ko ping karega"""
     return "Bot is alive and running!", 200
+
+@flask_app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook_handler():
+    """Telegram se updates handle karein aur queue mein daalein"""
+    try:
+        update_data = flask_request.get_json()
+        # Hum update ko seedha process nahi karenge, queue mein daalenge
+        update_queue.put_nowait(update_data)
+        return Response(status=200)
+    except Exception as e:
+        logger.error(f"Webhook handler mein error: {e}")
+        return Response(status=500)
 
 # --- Helper Functions ---
 
@@ -104,7 +127,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Saare commands ki jaankari dein."""
     help_text = (
         "**Sabhi Commands Ki List:**\n\n"
         "**1. Setup:**\n"
@@ -119,8 +141,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**3. Manual Forwarding:**\n"
         "• `/forward_range <start> <end>`: Purane messages ko copy karta hai.\n"
         "   ⚠️ **Note:** Yeh command sirf messages ko **COPY** karta hai, isme **REPLACEMENT NAHI HOTA**.\n\n"
-        "**Kaise Kaam Karta Hai?**\n"
-        "Setup poora hone ke baad, source channel mein aane wala har *naya* message automatically replace hokar target channel par bhej diya jayega."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
@@ -135,27 +155,23 @@ async def set_source_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Usage: /set_source <channel_id_or_username>")
         return
     chat_id_str = context.args[0]
-    if chat_id_str.lstrip('-').isdigit():
-        chat_id = int(chat_id_str)
-    else:
-        chat_id = chat_id_str
-    context.bot_data['source_channel'] = chat_id
-    await update.message.reply_text(f"✅ Source channel set to: {chat_id}")
+    context.bot_data['source_channel'] = chat_id_str
+    await update.message.reply_text(f"✅ Source channel set to: {chat_id_str}")
 
 async def set_target_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.message.reply_text("Usage: /set_target <channel_id_or_username>")
         return
     chat_id_str = context.args[0]
+    
     if chat_id_str.lstrip('-').isdigit():
-        chat_id = int(chat_id_str)
-        if not await is_admin(chat_id, context):
-            await update.message.reply_text(f"Main {chat_id} mein admin nahi hoon. Please mujhe admin banayein.")
+        chat_id_int = int(chat_id_str)
+        if not await is_admin(chat_id_int, context):
+            await update.message.reply_text(f"Main {chat_id_int} mein admin nahi hoon. Please mujhe 'Post messages' permission ke saath admin banayein.")
             return
-    else:
-        chat_id = chat_id_str
-    context.bot_data['target_channel'] = chat_id
-    await update.message.reply_text(f"✅ Target channel set to: {chat_id}")
+    
+    context.bot_data['target_channel'] = chat_id_str
+    await update.message.reply_text(f"✅ Target channel set to: {chat_id_str}")
 
 async def add_replace_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
@@ -208,43 +224,49 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # --- Live Message Handler (PTB) ---
 
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    source_channel = context.bot_data.get('source_channel')
-    target_channel = context.bot_data.get('target_channel')
+    source_channel_str = context.bot_data.get('source_channel')
+    target_channel_str = context.bot_data.get('target_channel')
     replacements = context.bot_data.get('replacements', [])
-    if not source_channel or not target_channel:
+    if not source_channel_str or not target_channel_str:
         return
+    
     chat_id = update.channel_post.chat.id
     username = update.channel_post.chat.username
+    
     is_from_source = False
-    if isinstance(source_channel, int):
-        is_from_source = (chat_id == source_channel)
-    elif isinstance(source_channel, str):
-        is_from_source = (str(chat_id) == source_channel) or (username and str(username).lower() == source_channel.lstrip('@').lower())
+    if (str(chat_id) == source_channel_str) or \
+       (username and source_channel_str.startswith('@') and str(username).lower() == source_channel_str.lstrip('@').lower()):
+        is_from_source = True
+        
     if not is_from_source:
         return
+        
     try:
         text, _, file_id, file_type, msg_id = get_text_and_entities(update)
         modified_text = apply_replacements(text, replacements)
         
+        try:
+            target_chat_id = int(target_channel_str)
+        except ValueError:
+             target_chat_id = target_channel_str
+
         if file_type == 'photo':
-            await context.bot.send_photo(chat_id=target_channel, photo=file_id, caption=modified_text)
+            await context.bot.send_photo(chat_id=target_chat_id, photo=file_id, caption=modified_text)
         elif file_type == 'video':
-            await context.bot.send_video(chat_id=target_channel, video=file_id, caption=modified_text)
+            await context.bot.send_video(chat_id=target_chat_id, video=file_id, caption=modified_text)
         elif file_type == 'document':
-            await context.bot.send_document(chat_id=target_channel, document=file_id, caption=modified_text)
+            await context.bot.send_document(chat_id=target_chat_id, document=file_id, caption=modified_text)
         elif file_type == 'audio':
-            await context.bot.send_audio(chat_id=target_channel, audio=file_id, caption=modified_text)
+            await context.bot.send_audio(chat_id=target_chat_id, audio=file_id, caption=modified_text)
         elif file_type == 'voice':
-             await context.bot.send_voice(chat_id=target_channel, voice=file_id, caption=modified_text)
+             await context.bot.send_voice(chat_id=target_chat_id, voice=file_id, caption=modified_text)
         elif file_type == 'sticker':
-            await context.bot.send_sticker(chat_id=target_channel, sticker=file_id)
+            await context.bot.send_sticker(chat_id=target_chat_id, sticker=file_id)
         elif modified_text:
-            await context.bot.send_message(chat_id=target_channel, text=modified_text)
-        elif text and not modified_text:
-             logger.info(f"Live msg {msg_id} replacement ke baad empty hai. Skip kar raha hoon.")
+            await context.bot.send_message(chat_id=target_chat_id, text=modified_text)
         else:
-            logger.info(f"Live msg {msg_id} mein text ya media nahi hai. Skip kar raha hoon.")
-        logger.info(f"Live message {msg_id} ko {source_channel} se {target_channel} forward kiya.")
+             logger.info(f"Msg {msg_id} skip kar raha hoon.")
+        logger.info(f"Live message {msg_id} ko {source_channel_str} se {target_chat_id} forward kiya.")
     except Exception as e:
         logger.error(f"Live message {update.channel_post.message_id} forward karne mein fail hua: {e}")
 
@@ -265,14 +287,19 @@ async def forward_range_command(update: Update, context: ContextTypes.DEFAULT_TY
         if start_id > end_id:
             await update.message.reply_text("Start ID hamesha End ID se chota hona chahiye.")
             return
+            
         await update.message.reply_text(f"Messages {start_id} se {end_id} tak copy karna shuru kar raha hoon... (Bina replacement ke)")
         count_success = 0
         count_fail = 0
+        
+        target_chat_id = int(target_channel)
+        source_chat_id = int(source_channel)
+        
         for message_id in range(start_id, end_id + 1):
             try:
                 await context.bot.copy_message(
-                    chat_id=target_channel,
-                    from_chat_id=source_channel,
+                    chat_id=target_chat_id,
+                    from_chat_id=source_chat_id,
                     message_id=message_id
                 )
                 count_success += 1
@@ -287,22 +314,16 @@ async def forward_range_command(update: Update, context: ContextTypes.DEFAULT_TY
             f"Failed to copy: {count_fail} messages"
         )
     except ValueError:
-        await update.message.reply_text("Message IDs numbers hone chahiye. Usage: /forward_range <start> <end>")
+        await update.message.reply_text("Message IDs/Channel IDs numbers hone chahiye. Usage: /forward_range <start> <end>")
     except Exception as e:
         await update.message.reply_text(f"Ek error aaya: {e}")
         logger.error(f"Error in forward_range: {e}")
 
-# --- Main Application Setup (PTB + Hypercorn) ---
+# --- Main Application Setup (Bot + Server) ---
 
-async def setup_bot():
-    """Bot application ko setup karein."""
-    if not BOT_TOKEN:
-        logger.critical("BOT_TOKEN environment variable nahi mila!")
-        raise ValueError("BOT_TOKEN environment variable nahi mila")
-    if not WEBHOOK_URL:
-        logger.critical("RENDER_EXTERNAL_URL (WEBHOOK_URL) environment variable nahi mila")
-        raise ValueError("RENDER_EXTERNAL_URL (WEBHOOK_URL) environment variable nahi mila")
-
+async def main():
+    """Bot ko setup karein aur Flask server ke saath jodein."""
+    
     persistence = PicklePersistence(filepath="bot_data.pickle")
     application = (
         Application.builder()
@@ -326,62 +347,59 @@ async def setup_bot():
     # Naye messages ke liye handler
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_channel_post))
 
-    # Bot ko initialize karna zaroori hai
+    # Bot ko initialize karein
     await application.initialize()
+    logger.info("Bot application initialize ho gayi hai.")
 
     # Webhook set karein
+    await application.bot.set_webhook(
+        url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
+        allowed_updates=Update.ALL_TYPES
+    )
+    logger.info(f"Webhook ko {WEBHOOK_URL} par set kar diya gaya hai")
+    
+    # Queue se updates process karein
+    async def process_updates():
+        logger.info("Update processor shuru ho gaya hai...")
+        while True:
+            try:
+                update_data = await update_queue.get()
+                update = Update.de_json(data=update_data, bot=application.bot)
+                await application.process_update(update)
+            except Exception as e:
+                logger.error(f"Update process karne mein error: {e}")
+    
+    # PTB ke tasks ko chalayein
+    async def run_ptb_tasks():
+        logger.info("PTB tasks (application.run_async()) shuru kar raha hoon...")
+        await application.run_async()
+
+    # Flask server ko alag thread mein chalayein (Waitress ka istemaal karke)
+    def run_flask_server():
+        logger.info(f"Waitress server 0.0.0.0:{PORT} par start ho raha hai...")
+        waitress_serve(flask_app, host='0.0.0.0', port=PORT, _quiet=True)
+
+    # --- Dono ko ek saath run karein ---
+    
+    # 1. Flask server ko thread mein start karein
+    import threading
+    server_thread = threading.Thread(target=run_flask_server, daemon=True)
+    server_thread.start()
+    
+    # 2. PTB tasks aur Queue processor ko asyncio mein run karein
     try:
-        await application.bot.set_webhook(
-            url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
-            allowed_updates=Update.ALL_TYPES
+        await asyncio.gather(
+            run_ptb_tasks(),
+            process_updates()
         )
-        logger.info(f"Webhook ko {WEBHOOK_URL} par set kar diya gaya hai")
-    except Exception as e:
-        logger.error(f"Webhook set karne mein fail hua: {e}")
-        return None, None
-
-    return application, application.bot
-
-# Flask server ko Telegram app ke saath jodein
-async def run_server(application):
-    """Flask aur Hypercorn server ko run karein."""
-    
-    # Yeh webhook route zaroori hai
-    @flask_app.route(f'/{BOT_TOKEN}', methods=['POST'])
-    async def webhook():
-        """Telegram se updates handle karein"""
-        try:
-            update_data = flask_request.get_json()
-            update = Update.de_json(data=update_data, bot=application.bot)
-            await application.process_update(update)
-            return 'ok', 200
-        except Exception as e:
-            logger.error(f"Webhook handler mein error: {e}")
-            return 'error', 500
-
-    logger.info("Hypercorn server (Flask ke saath) start ho raha hai...")
-    
-    # Hypercorn ke liye config object banayein
-    hypercorn_config = HypercornConfig()
-    hypercorn_config.bind = [f"0.0.0.0:{PORT}"]
-    hypercorn_config.accesslog = "-" # Log to stdout
-    hypercorn_config.errorlog = "-" # Log to stdout
-    
-    # application.shutdown_event ko set karein
-    shutdown_event = asyncio.Event()
-
-    async def _shutdown_wrapper():
+    except KeyboardInterrupt:
+        logger.info("Bot band ho raha hai...")
+    finally:
         await application.shutdown()
-        shutdown_event.set()
-
-    # Server ko asyncio ke saath run karein
-    await hypercorn_serve(flask_app, hypercorn_config, shutdown_trigger=_shutdown_wrapper)
-
-async def main():
-    application, bot = await setup_bot()
-    if application:
-        # Ab hum 'run_server' call karenge
-        await run_server(application)
+        logger.info("Bot successfully band ho gaya.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.critical(f"Bot main function mein crash ho gaya: {e}")
