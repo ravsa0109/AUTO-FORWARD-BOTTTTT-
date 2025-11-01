@@ -14,11 +14,13 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-# Flask import - Web server ke liye (Uptimer ke liye)
+# Flask aur Hypercorn imports
 try:
     from flask import Flask, request as flask_request
+    from hypercorn.config import Config as HypercornConfig
+    from hypercorn.asyncio import serve as hypercorn_serve
 except ImportError:
-    print("Flask library not found. Please install it: pip install Flask")
+    print("Flask ya Hypercorn library nahi mili. Install karein: pip install flask hypercorn")
     exit()
 
 # Set up logging
@@ -290,7 +292,7 @@ async def forward_range_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(f"Ek error aaya: {e}")
         logger.error(f"Error in forward_range: {e}")
 
-# --- Main Application Setup (PTB + Flask) ---
+# --- Main Application Setup (PTB + Hypercorn) ---
 
 async def setup_bot():
     """Bot application ko setup karein."""
@@ -324,10 +326,8 @@ async def setup_bot():
     # Naye messages ke liye handler
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_channel_post))
 
-    # === YEH HAI NAYI LINE ===
     # Bot ko initialize karna zaroori hai
     await application.initialize()
-    # ========================
 
     # Webhook set karein
     try:
@@ -343,7 +343,10 @@ async def setup_bot():
     return application, application.bot
 
 # Flask server ko Telegram app ke saath jodein
-async def run_flask(application):
+async def run_server(application):
+    """Flask aur Hypercorn server ko run karein."""
+    
+    # Yeh webhook route zaroori hai
     @flask_app.route(f'/{BOT_TOKEN}', methods=['POST'])
     async def webhook():
         """Telegram se updates handle karein"""
@@ -356,13 +359,29 @@ async def run_flask(application):
             logger.error(f"Webhook handler mein error: {e}")
             return 'error', 500
 
-    logger.info("Flask server start ho raha hai...")
-    flask_app.run(host='0.0.0.0', port=PORT, debug=False)
+    logger.info("Hypercorn server (Flask ke saath) start ho raha hai...")
+    
+    # Hypercorn ke liye config object banayein
+    hypercorn_config = HypercornConfig()
+    hypercorn_config.bind = [f"0.0.0.0:{PORT}"]
+    hypercorn_config.accesslog = "-" # Log to stdout
+    hypercorn_config.errorlog = "-" # Log to stdout
+    
+    # application.shutdown_event ko set karein
+    shutdown_event = asyncio.Event()
+
+    async def _shutdown_wrapper():
+        await application.shutdown()
+        shutdown_event.set()
+
+    # Server ko asyncio ke saath run karein
+    await hypercorn_serve(flask_app, hypercorn_config, shutdown_trigger=_shutdown_wrapper)
 
 async def main():
     application, bot = await setup_bot()
     if application:
-        await run_flask(application)
+        # Ab hum 'run_server' call karenge
+        await run_server(application)
 
 if __name__ == "__main__":
     asyncio.run(main())
